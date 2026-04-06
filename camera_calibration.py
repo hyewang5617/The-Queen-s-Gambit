@@ -1,120 +1,138 @@
 import cv2 as cv
 import numpy as np
 
-# 체스보드 내부 코너 개수 (너 기준)
+
 CHECKERBOARD = (7, 5)
+MAX_SAMPLES = 30
+MIN_SAMPLES = 10
 
-# 3D 좌표 생성 (z=0 평면)
-objp = np.zeros((CHECKERBOARD[0]*CHECKERBOARD[1], 3), np.float32)
-objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
 
-objpoints = []  # 3D points
-imgpoints = []  # 2D points
+def build_object_points(pattern_size):
+    objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
+    objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2)
+    return objp
 
-cap = cv.VideoCapture("chessboard.mp4")
 
-if not cap.isOpened():
-    print("동영상을 열 수 없습니다.")
-    exit()
+def select_evenly_spaced(items, limit):
+    if len(items) <= limit:
+        return items
 
-print("캘리브레이션 진행 중... (ESC 종료)")
+    indices = np.linspace(0, len(items) - 1, limit, dtype=int)
+    return [items[i] for i in indices]
 
-image_size = None
 
-while True:
-    ret, frame = cap.read()
+def compute_mean_reprojection_error(objpoints, imgpoints, rvecs, tvecs, mtx, dist):
+    total_error = 0.0
 
-    # 영상 끝 처리 (중요)
-    if not ret or frame is None:
-        print("영상 끝")
-        break
+    for objp, imgp, rvec, tvec in zip(objpoints, imgpoints, rvecs, tvecs):
+        projected, _ = cv.projectPoints(objp, rvec, tvec, mtx, dist)
+        total_error += cv.norm(imgp, projected, cv.NORM_L2) / len(projected)
 
-    gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    return total_error / len(objpoints)
 
-    # 이미지 크기 저장 (한 번만)
-    if image_size is None:
-        image_size = gray.shape[::-1]
 
-    # 체스보드 코너 찾기
-    found, corners = cv.findChessboardCorners(
-        gray,
-        CHECKERBOARD,
-        cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE
-    )
+def main():
+    objp = build_object_points(CHECKERBOARD)
+    detected_samples = []
 
-    if found and len(objpoints) < 30:
-        corners2 = cv.cornerSubPix(
+    cap = cv.VideoCapture("chessboard.mp4")
+
+    if not cap.isOpened():
+        print("Cannot open calibration video.")
+        raise SystemExit
+
+    print("Collecting chessboard corners... (ESC to quit)")
+
+    image_size = None
+    frame_index = 0
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret or frame is None:
+            break
+
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+
+        if image_size is None:
+            image_size = gray.shape[::-1]
+
+        found, corners = cv.findChessboardCorners(
             gray,
-            corners,
-            (11, 11),
-            (-1, -1),
-            (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            CHECKERBOARD,
+            cv.CALIB_CB_ADAPTIVE_THRESH + cv.CALIB_CB_NORMALIZE_IMAGE,
+        )
+
+        if found:
+            corners2 = cv.cornerSubPix(
+                gray,
+                corners,
+                (11, 11),
+                (-1, -1),
+                (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001),
+            )
+            detected_samples.append((frame_index, corners2))
+            cv.drawChessboardCorners(frame, CHECKERBOARD, corners2, found)
+
+        cv.imshow("Calibration", frame)
+
+        if cv.waitKey(30) & 0xFF == 27:
+            print("Stopped by ESC.")
+            break
+
+        frame_index += 1
+
+    cap.release()
+    cv.destroyAllWindows()
+
+    print("\n=== Detection Summary ===")
+    print("Detected frames:", len(detected_samples))
+
+    if len(detected_samples) < MIN_SAMPLES:
+        print(f"Not enough valid samples. Need at least {MIN_SAMPLES}.")
+        raise SystemExit
+
+    if image_size is None:
+        print("Failed to infer image size.")
+        raise SystemExit
+
+    selected_samples = select_evenly_spaced(detected_samples, MAX_SAMPLES)
+    selected_indices = [index for index, _ in selected_samples]
+
+    objpoints = [objp.copy() for _ in selected_samples]
+    imgpoints = [corners for _, corners in selected_samples]
+
+    print("Selected frame indices:")
+    print(selected_indices)
+
+    print("\nRunning camera calibration...")
+
+    rmse, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
+        objpoints,
+        imgpoints,
+        image_size,
+        None,
+        None,
     )
 
-        objpoints.append(objp.copy())
-        imgpoints.append(corners2)
+    mean_error = compute_mean_reprojection_error(objpoints, imgpoints, rvecs, tvecs, mtx, dist)
 
-        # 화면에 표시
-        cv.drawChessboardCorners(frame, CHECKERBOARD, corners2, found)
+    print("Calibration finished.")
+    print("\n=== Camera Matrix ===")
+    print(mtx)
 
-    cv.imshow("Calibration", frame)
+    print("\n=== Distortion Coefficients ===")
+    print(dist)
 
-    # ESC 종료
-    if cv.waitKey(30) & 0xFF == 27:
-        print("ESC 종료")
-        break
+    print("\n=== RMSE ===")
+    print(rmse)
 
-cap.release()
-cv.destroyAllWindows()
+    print("\n=== Mean Reprojection Error ===")
+    print(mean_error)
 
-print("\n=== 수집 결과 ===")
-print("objpoints 개수:", len(objpoints))
-print("imgpoints 개수:", len(imgpoints))
+    np.savez("calibration_data.npz", mtx=mtx, dist=dist, image_size=np.array(image_size))
+    print("\nSaved calibration_data.npz")
 
-# 데이터 부족 체크
-if len(objpoints) < 10:
-    print("데이터 부족 (최소 10장 필요)")
-    exit()
 
-if image_size is None:
-    print("image_size 없음")
-    exit()
-
-print("\n캘리브레이션 시작...")
-
-# 캘리브레이션 수행
-ret, mtx, dist, rvecs, tvecs = cv.calibrateCamera(
-    objpoints,
-    imgpoints,
-    image_size,
-    None,
-    None
-)
-
-print("캘리브레이션 완료!")
-
-# ===== 결과 출력 =====
-fx = mtx[0][0]
-fy = mtx[1][1]
-cx = mtx[0][2]
-cy = mtx[1][2]
-
-print("\n=== Camera Matrix ===")
-print(mtx)
-
-print("\n=== Intrinsic Parameters ===")
-print(f"fx = {fx}")
-print(f"fy = {fy}")
-print(f"cx = {cx}")
-print(f"cy = {cy}")
-
-print("\n=== Distortion Coefficients ===")
-print(dist)
-
-print("\n=== RMSE ===")
-print(ret)
-
-# 결과 저장
-np.savez("calibration_data.npz", mtx=mtx, dist=dist)
-
-print("\ncalibration_data.npz 저장 완료")
+if __name__ == "__main__":
+    main()
