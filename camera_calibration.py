@@ -5,6 +5,7 @@ import numpy as np
 CHECKERBOARD = (7, 5)
 MAX_SAMPLES = 30
 MIN_SAMPLES = 10
+OUTPUT_VIDEO = "camera_calibration_result.mp4"
 
 
 def build_object_points(pattern_size):
@@ -45,6 +46,7 @@ def main():
 
     image_size = None
     frame_index = 0
+    writer = None
 
     while True:
         ret, frame = cap.read()
@@ -56,6 +58,12 @@ def main():
 
         if image_size is None:
             image_size = gray.shape[::-1]
+            writer = cv.VideoWriter(
+                OUTPUT_VIDEO,
+                cv.VideoWriter_fourcc(*"mp4v"),
+                30.0,
+                image_size,
+            )
 
         found, corners = cv.findChessboardCorners(
             gray,
@@ -74,6 +82,19 @@ def main():
             detected_samples.append((frame_index, corners2))
             cv.drawChessboardCorners(frame, CHECKERBOARD, corners2, found)
 
+        cv.putText(
+            frame,
+            f"Detected frames: {len(detected_samples)}",
+            (10, 30),
+            cv.FONT_HERSHEY_DUPLEX,
+            0.8,
+            (0, 255, 0),
+            1,
+        )
+
+        if writer is not None:
+            writer.write(frame)
+
         cv.imshow("Calibration", frame)
 
         if cv.waitKey(30) & 0xFF == 27:
@@ -83,6 +104,8 @@ def main():
         frame_index += 1
 
     cap.release()
+    if writer is not None:
+        writer.release()
     cv.destroyAllWindows()
 
     print("\n=== Detection Summary ===")
@@ -132,6 +155,7 @@ def main():
 
     np.savez("calibration_data.npz", mtx=mtx, dist=dist, image_size=np.array(image_size))
     print("\nSaved calibration_data.npz")
+    print(f"Saved {OUTPUT_VIDEO}")
 
 
 if __name__ == "__main__":
